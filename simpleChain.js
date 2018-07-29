@@ -44,20 +44,25 @@ class BlockLevelDB {
   }
 
   // Traverse data of entire blockchain
-  traversBlockChainData(finishCallback, errCallback) {
+  // Code Review 2017-07-29: Traverse tuning, do not store entire blockchain data
+  traversData(finishCallback, iterCallback, errCallback) {
     let i = 0;
-    let chain = [];
     db.createReadStream().on('data', function(data) {
           i++;
-          chain.push(JSON.parse(data.value));
+          if (iterCallback) {
+            iterCallback(JSON.parse(data.value));
+          }
         }).on('error', function(err) {
           console.log('Unable to read data stream!', err)
-          errCallback(err);
+          if (errCallback) {
+            errCallback(err);
+          }
         }).on('close', function() {
-          finishCallback(chain);
+          if (finishCallback) {
+            finishCallback(i);
+          }
         });
   }
-
 }
 
 /* ===== Block Class ==============================
@@ -85,21 +90,19 @@ class Blockchain{
     // preserve BlockChain instance for closure
     let blockchain = this;
     // initialize blockchain data and add genesis block if not exists
-    this.level.traversBlockChainData(function(chain) {
-      if (chain.length == 0) {
+    this.level.traversData(function(height) {
+      if (height == 0) {
         console.log("Adding genesis block");
         blockchain.addBlock(new Block("First Block - Genesis"), function(result) {
           if (callback) {
-            callback(chain);
+            callback(1);
           }
         });
       } else {
         if (callback) {
-          callback(chain);
+          callback(height);
         }
       }
-    }, function(err) {
-      console.log("error caught when filling block data");
     });
   }
 
@@ -107,32 +110,34 @@ class Blockchain{
   addBlock(newBlock, callback){
     console.log("Adding new block");
     let level = this.level;
-    this.level.traversBlockChainData(function(chain) {
+    this.level.traversData(function(height) {
       // Block height
-      newBlock.height = chain.length;
+      newBlock.height = height;
       // UTC timestamp
       newBlock.time = new Date().getTime().toString().slice(0,-3);
       // previous block hash
-      if(chain.length>0){
-        newBlock.previousBlockHash = chain[chain.length-1].hash;
+      if(height > 0){
+        level.getLevelDBData(height - 1, function(block) {
+          newBlock.previousBlockHash = block.hash;
+          // Block hash with SHA256 using newBlock and converting to a string
+          newBlock.hash = SHA256(JSON.stringify(newBlock)).toString();
+          // Adding block object to chain
+          level.addLevelDBData(newBlock.height, newBlock, callback);
+        })
+      } else {
+        // Block hash with SHA256 using newBlock and converting to a string
+        newBlock.hash = SHA256(JSON.stringify(newBlock)).toString();
+        // Adding block object to chain
+        level.addLevelDBData(newBlock.height, newBlock, callback);
       }
-      // Block hash with SHA256 using newBlock and converting to a string
-      newBlock.hash = SHA256(JSON.stringify(newBlock)).toString();
-      // Adding block object to chain
-      level.addLevelDBData(newBlock.height, newBlock, callback);
-    }, function(err) {
-      console.log("error caught when filling block data");
     });
 
   }
 
   // Get block height
   getBlockHeight(callback){
-    let chain = [];
-    this.level.traversBlockChainData(function(chain) {
-      callback(chain.length - 1);
-    }, function(err) {
-      console.log("error caught when filling block data");
+    this.level.traversData(function(height) {
+      callback(height - 1);
     });
   }
 
@@ -173,34 +178,37 @@ class Blockchain{
   }
 
   // Validate blockchain
+  // Code review 2018-07-29: Tuning for the chain loop and validation
   validateChain(){
     let blockchain = this;
-    this.level.traversBlockChainData(function(chain) {
-      let errorLog = [];
-      for (var i = 0; i < chain.length-1; i++) {
-        var block = chain[i];
-        // validate block
-        if (!blockchain.validateBlockData(block))errorLog.push(i);
-        // compare blocks hash link
-        let blockHash = chain[i].hash;
-        let previousHash = chain[i+1].previousBlockHash;
-        if (blockHash!==previousHash) {
-          errorLog.push(i);
-        }
-      }
+    let errorLog = [];
+    let traverseLength = 0;
+    
+    this.level.traversData(function(height) {
       if (errorLog.length>0) {
         console.log('Block errors = ' + errorLog.length);
         console.log('Blocks: '+errorLog);
       } else {
         console.log('No errors detected');
       }
-    }, function(err) {
-      console.log("error caught when filling block data");
+    }, function(block){
+      if (!blockchain.validateBlockData(block))errorLog.push(i);
+
+      if (block.height > 0) {
+        // compare blocks hash link
+        blockchain.getBlock(block.height - 1, function(lastBlock){
+          let blockPrevHash = block.previousBlockHash;
+          let previousHash = lastBlock.hash;
+          if (blockPrevHash!==previousHash) {
+            errorLog.push(block.height);
+          }
+        });
+      }
     });
   }
 }
 
-let blockchain = new Blockchain(function(chain) {
+let blockchain = new Blockchain(function(height) {
 
   // Get Genesis block
   console.log("1. Get genesis block data");
